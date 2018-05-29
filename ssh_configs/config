@@ -1,0 +1,22 @@
+#Add the following to your existing ssh config file (usually in .ssh/ directory)
+### First jumphost. Directly reachable
+ Host < name to refence this jumpbox "ie. jumpbox1" >
+ HostName < ip of jumpbox to external network/subnetwork > 
+ ProxyCommand ssh -o 'ForwardAgent yes' -A -W %h:%p < name of connecting box "ie. devproxy">
+ PreferredAuthentications publickey
+ User <user on the target jump box>
+ ForwardAgent yes
+
+### Second jumphost. Only reachable via jumphost1.example.org
+ Host < name to refence this box "i.e devproxy" >
+ HostName < ip for inital box in jump sequence >
+ PreferredAuthentications publickey
+ user <user for the inital box >
+ ForwardAgent yes
+
+### Host only reachable via alphajump and betajump
+ Host < ip address range that the jumpbox can reach "xxx.xxx.*">
+ #ProxyCommand ssh -vv -A -W %h:%p betajump
+ ProxyCommand ssh  -o 'ForwardAgent yes' -A -W %h:%p < name of box that saervers a the connecting box for the ip range" ie. jumpbox1">
+
+# Repeat the steps above for each subnet that you have a jumpbox, and this will allong you to ssh from you local box to any of the corresponding targets in the other subnetworks 
