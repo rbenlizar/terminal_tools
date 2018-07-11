@@ -1,0 +1,339 @@
+set -u
+
+# When script exists, run the clean up process
+trap exit_app 0
+
+trap error_app INT TERM HUP KILL
+
+WORKFLOWS_DIR=''
+PLAYBOOK_DIR=''
+
+_init() {
+
+  WORKFLOWS_DIR=`readlink -f ${1} | xargs dirname`
+  PLAYBOOK_DIR=`dirname ${WORKFLOWS_DIR}`
+
+  # suppress the output of the pushd command
+  pushd ${PLAYBOOK_DIR}/ 1>/dev/null
+}
+
+_cleanup() {
+  # suppress output of the popd command
+  popd 1>/dev/null
+}
+
+exit_app() {
+  _cleanup
+}
+
+error_app() {
+  echo 'Error encountered - exiting'
+  _cleanup
+  exit 1
+}
+
+_execute_playbook() {
+  local sTags="${1}"
+  local sPlaybook="${2}"
+  shift 2
+
+  local sEnvironment="${G_ENVIRONMENT_NAME}"
+  local sBuildVersion=''
+  if [[ "n${G_DEPLOY_VERSION}" != 'n' ]] ; then
+    sBuildVersion="--extra-vars=deploy_build_version=${G_DEPLOY_VERSION}"
+    echo "Running with: ${sBuildVersion}"
+  fi
+
+  set -x
+
+  time \
+  ANSIBLE_HOST_KEY_CHECKING=false \
+  ANSIBLE_FORCE_COLOR=true \
+  /usr/bin/ansible-playbook \
+    ${sPlaybook} \
+    -i ../ansible-ee-inventory/ee-${sEnvironment}.ini \
+    --tags ${sTags} \
+    --diff \
+    ${sBuildVersion} \
+    ${G_DRYRUN} \
+    $@
+
+  set +x
+}
+
+_download_roles() {
+
+  if [[ -r ./requirements.yml ]] ; then
+    echo "Downloading roles for execution"
+    time \
+    /usr/bin/ansible-galaxy \
+      install \
+      -r \
+      ./requirements.yml
+  fi
+}
+[rbenlizar@devops-gui ansible-ee-playbook]$ q
+bash: q: command not found
+[rbenlizar@devops-gui ansible-ee-playbook]$ cat workflows/workflow 
+#!/usr/bin/env bash
+#set -x
+set -eo pipefail
+
+# Defined global variables
+G_ADDITIONAL_ARGS=''
+G_LOGLEVEL='info'
+G_DRYRUN=''
+G_WORKFLOW=''
+G_ENVIRONMENT_NAME=''
+G_DEPLOY_VERSION=''
+
+_usage() {
+  echo -e 'Ansible Workflow Engine Orchestrator'
+  echo -e '\n'
+  echo -e 'Synopsis: '
+  echo -e '   workflow -w <workflow name> -e <environment name> [-d|--dry-run] [-l|--loglevel <log level>] [additional_arguments]'
+  echo -e '\n'
+  echo -e 'Options'
+  echo -e '   -w, --workflow WORKFLOW_NAME'
+  echo -e '          Workflow programmed in to execute'
+  echo -e '   -e, --environment ENVIRONMENT_NAME'
+  echo -e '          Name of the target environment to deploy into'
+  echo -e '   -l, --loglevel LOGLEVEL'
+  echo -e '          Log level of the orchestrator engine'
+  echo -e '   --deploy-version'
+  echo -e '          Specify the version of software to deploy onto the platform. This is required to execute'
+  echo -e '          the deploy and _install workflows.'
+  echo -e '   -d, --dry-run'
+  echo -e '          Run the workflows in "--check" mode. Note this may not work'
+  echo -e '          properly in all scenarios'
+  echo -e '   -h, --help'
+  echo -e '          Display this output'
+  echo -e '   additional_arguments'
+  echo -e '          Any additional inputs provided that do not match the above criteria. This allows for adhoc'
+  echo -e '          execution of the workflows, such as running limit commands without having to add the'
+  echo -e '          additional overhead in this application to handle the inputs.'
+}
+
+_load_function_library() {
+# Find and load the standard functions to be used by this code
+functions_locations=''
+
+if [ "${WORKSPACE}" == "n${WORKSPACE}" ] ; then
+  if [ -e ${WORKSPACE}/playbook/workflows/functions.shlib ] ; then
+    functions_location="${WORKSPACE}/playbook/workflows/functions.shlib"
+  fi
+fi
+
+if [ -e ./ansible-ee-playbook/workflows/functions.shlib ] ; then
+  functions_location="./ansible-ee-playbook/workflows/functions.shlib"
+fi
+
+if [ -e ./workflows/functions.shlib ] ; then
+  functions_location="./workflows/functions.shlib"
+fi
+
+if [ -e ./functions.shlib ] ; then
+  functions_location="./functions.shlib"
+fi
+
+if [ "${functions_location}" == "n${functions_location}" ] ; then
+  echo "FATAL - Could not locate a copy of the local functions.shlib file. Exiting."
+  exit 1
+fi
+
+if [ ! -r "${functions_location}" ] ; then
+  echo "FATAL - Could not read the local copy of the local functions.shlib file [${functions_location}]. Exiting."
+  exit 2
+fi
+
+# all variables should be assigned at this point
+set -u
+
+. ${functions_location}
+
+}
+
+_parse_workflow_input() {
+  while [ "${1:-}" != "" ] ;
+  do
+    # As silly as this section is, the -e parameter causes issues with the "echo" command.  To avoid this,
+    # the following IF logic was implemented to bypass using echo on a "-e" parameter.
+    if [[ "${1}" = "-e" || "${1}" = "-E" ]] ; then
+      PARM="-e"
+    else
+    # Need to include tr [:upper:] [:lower:] once ref data name is fixed.  Having issues supplying name
+    # due to lower case of ref release name (i.e. EE_xx -> ee_xx)
+      PARM=`echo ${1}`
+    fi
+
+    case "${PARM}" in
+      -w | --workflow )
+                shift
+                G_WORKFLOW=`echo ${1} | tr [:upper:] [:lower:]`
+                ;;
+      -e | --environment )
+                shift
+                G_ENVIRONMENT_NAME=`echo ${1} | tr [:upper:] [:lower:]`
+                ;;
+      -l | --loglevel )
+                shift
+                G_LOGLEVEL=`echo ${1} | tr [:upper:] [:lower:]`
+                ;;
+      --deploy_version )
+                shift
+                G_DEPLOY_VERSION="${1}"
+                ;;
+      -d | --dry-run )
+                G_DRYRUN='--check'
+                ;;
+      -h | --help )
+                _usage
+                exit 0
+                ;;
+      * )
+                G_ADDITIONAL_ARGS="${G_ADDITIONAL_ARGS} ${PARM}"
+                ;;
+    esac
+
+    shift
+  done
+
+  echo 'Running Parameters:'
+  echo -e "  Workflow Action:      [${G_WORKFLOW}]"
+  echo -e "  Target Environment:   [${G_ENVIRONMENT_NAME}]"
+  echo -e "  Log Level:            [${G_LOGLEVEL}]"
+  echo -e "  Build Version:        [${G_DEPLOY_VERSION}]"
+  echo -e "  Dry Run?              [${G_DRYRUN}]"
+  echo -e "  Additional Arguments: [${G_ADDITIONAL_ARGS}]"
+
+  if [[ "${G_WORKFLOW}" == "" ]] ; then
+    echo "FATAL - the workflow was not defined, and is required. Exiting"
+    exit 1
+  fi
+
+  if [[ "${G_ENVIRONMENT_NAME}" == "" ]] ; then
+    echo "FATAL - the target environment was not defined, and is required. Exiting"
+    exit 1
+  fi
+
+  if [[ "${G_DEPLOY_VERSION}" == "" && ( "${G_WORKFLOW}" == '_install' || "${G_WORKFLOW}" == 'deploy' ) ]] ; then
+    echo "FATAL - the build version was not specified, but the install or deploy workflow was selected. This parameter is required for either workflow. Exiting"
+    exit 1
+  fi
+}
+
+_execute_workflow() {
+  case "${G_WORKFLOW}" in
+    'local' )
+              _execute_playbook 'stop' 'ee_stop_local.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'install' 'ee_local.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'start' 'ee_local.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'local_uninstall' )
+              _execute_playbook 'stop,uninstall' 'ee_stop_local.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'local_stop' )
+              _execute_playbook 'stop' 'ee_stop_local.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'deploy' )
+              _execute_playbook 'stop' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+#              _execute_playbook 'stop,uninstall,purge' 'purge_sysmond.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'uninstall,purge' 'purge_webgate.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'install' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'start' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'smoketest' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'deploy_ref_data' )
+              _execute_playbook 'deploy_ref_data' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'drain' )
+              _execute_playbook 'drain' 'ee_rolling_in_out_load.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'out_of_load' )
+              _execute_playbook 'drain,stop' 'ee_rolling_in_out_load.yml' ${G_ADDITIONAL_ARGS} --limit mgmt_deployment_server:disabled_az_jboss_eap
+              ;;
+    'in_load' )
+              _execute_playbook 'start' 'ee_rolling_in_out_load.yml' ${G_ADDITIONAL_ARGS} --limit mgmt_deployment_server:az_jboss_eap:!disabled_az_jboss_eap
+              ;;
+    'rolling_deploy' )
+              _execute_playbook 'drain,stop,install,start,smoketest' 'ee_rolling_deploy.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'restart' )
+              _execute_playbook 'stop' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'start' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'start' )
+              _execute_playbook 'start' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'smoketest' )
+              _execute_playbook 'smoketest' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'stop' )
+              _execute_playbook 'stop' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'uninstall' )
+              _execute_playbook 'stop' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'uninstall' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'purge' )
+              _execute_playbook 'stop' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'uninstall' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'purge' 'ee_stop.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'marklogic_install' )
+              _execute_playbook 'install' 'ee_marklogic.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'marklogic_start' )
+              _execute_playbook 'start' 'ee_marklogic.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'marklogic_uninstall' )
+              _execute_playbook 'uninstall' 'ee_stop_marklogic.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    'marklogic_stop' )
+              _execute_playbook 'stop' 'ee_stop_marklogic.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    '_install' )
+              _execute_playbook 'uninstall,purge' 'purge_webgate.yml' ${G_ADDITIONAL_ARGS}
+              _execute_playbook 'install' 'ee.yml' ${G_ADDITIONAL_ARGS}
+              ;;
+    * )
+              echo "FATAL - Could not identify the attempted workflow [${G_WORKFLOW}]. Exiting."
+              exit 3
+              ;;
+  esac
+}
+
+main() {
+
+  # Load support functions into this script
+  _load_function_library
+
+  # Initialize the playbook execution space
+  _init "${1}"
+  shift
+
+  # Parse the input logic from the caller
+  _parse_workflow_input "$@"
+
+  # Temporary - Cleanup activity that will be integrated into the init-playbook role
+  /usr/bin/find . -type f -name 'build_inventory.yml' -delete
+
+  # Clear ./tmp/ directory
+  /bin/rm -rf ${PLAYBOOK_DIR}/tmp/
+  /bin/rm -rf ${PLAYBOOK_DIR}/.imported_roles/
+
+  # Re-create the temp directory and pre-seed the build_inventory.yml file
+  /bin/mkdir -m 0700 ${PLAYBOOK_DIR}/.imported_roles/
+  /bin/mkdir -m 0700 ${PLAYBOOK_DIR}/tmp/
+  touch ${PLAYBOOK_DIR}/tmp/build_inventory.yml
+
+  /usr/bin/find ./.imported_roles -mindepth 1 -maxdepth 1 -type d -exec rm -rfv {} \;
+
+  # Download the imported_roles from Nexus
+  _download_roles
+
+  # Execute the workflow
+  _execute_workflow
+}
+
+main "${0}" "$@"
